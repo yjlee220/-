@@ -491,45 +491,6 @@
 </head>
 <body>
 
-<!-- 카카오톡 인앱 브라우저 차단 오버레이 -->
-<div id="kakaoBlock" style="display:none; position:fixed; inset:0; background:#FAE100; z-index:99999; flex-direction:column; align-items:center; justify-content:center; padding:32px 24px; text-align:center;">
-  <div style="font-size:64px; margin-bottom:16px;">🕊️</div>
-  <div style="font-size:22px; font-weight:800; color:#3a1a00; margin-bottom:10px; line-height:1.4;">외부 브라우저로<br>열어주세요!</div>
-  <div style="font-size:15px; color:#5a3a00; margin-bottom:32px; line-height:1.9;">카카오톡 안에서는<br>이 앱이 제대로 작동하지 않아요 😢</div>
-
-  <div style="background:white; border-radius:16px; padding:24px 20px; width:100%; max-width:340px; box-shadow:0 4px 20px rgba(0,0,0,0.12); margin-bottom:24px;">
-    <div style="font-size:13px; font-weight:700; color:#1a2b3c; margin-bottom:16px;">📱 이렇게 해주세요</div>
-    <div style="display:flex; flex-direction:column; gap:12px; text-align:left;">
-      <div style="display:flex; align-items:flex-start; gap:10px;">
-        <span style="background:#FAE100; border-radius:50%; width:24px; height:24px; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:800; flex-shrink:0;">1</span>
-        <span style="font-size:14px; color:#333; line-height:1.6;">화면 오른쪽 상단<br><strong>··· 또는 ⋮ 버튼</strong> 탭</span>
-      </div>
-      <div style="display:flex; align-items:flex-start; gap:10px;">
-        <span style="background:#FAE100; border-radius:50%; width:24px; height:24px; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:800; flex-shrink:0;">2</span>
-        <span style="font-size:14px; color:#333; line-height:1.6;"><strong>"다른 브라우저로 열기"</strong><br>또는 <strong>"Safari로 열기"</strong> 선택</span>
-      </div>
-      <div style="display:flex; align-items:flex-start; gap:10px;">
-        <span style="background:#FAE100; border-radius:50%; width:24px; height:24px; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:800; flex-shrink:0;">3</span>
-        <span style="font-size:14px; color:#333; line-height:1.6;">브라우저에서 열리면<br>정상 사용 가능해요 ✅</span>
-      </div>
-    </div>
-  </div>
-
-  <div style="font-size:12px; color:#7a5a00; opacity:0.8;">💡 한 번만 하면 이후엔 바로 열려요</div>
-</div>
-
-<script>
-// 카카오톡 인앱 브라우저 감지 — 즉시 실행
-(function() {
-  var ua = navigator.userAgent || '';
-  var isKakao = /KAKAOTALK/i.test(ua) || /kakao/i.test(ua);
-  if (isKakao) {
-    var el = document.getElementById('kakaoBlock');
-    if (el) el.style.display = 'flex';
-  }
-})();
-</script>
-
 <header>
   <div class="icon">🕊️</div>
   <div>
@@ -576,6 +537,7 @@
         <div style="margin-top:10px; font-size:12px; color:var(--text-soft);" id="teacherHint">
           전체 아이가 표시돼요
         </div>
+        <div id="syncStatus" style="margin-top:6px; font-size:12px; font-weight:600;"></div>
       </div>
     </div>
   </div>
@@ -872,7 +834,9 @@ const TEACHER_INFO = {
   all:      { label: '👀 전체', group: null },
 };
 
-const CHILDREN = [
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyV0yu1EdEAgdRvqp1ESE8fwKjsf3dPgzad6S6rwckOG1Ou4CemLcZjMvp1zDZ_X2qiGQ/exec';
+
+const DEFAULT_CHILDREN = [
   {no:1, name:'이한별', group:'pink', teacher:'teacher1'},{no:2, name:'한윤성', group:'pink', teacher:'teacher1'},{no:3, name:'이동은', group:'pink', teacher:'teacher1'},{no:4, name:'이나은', group:'pink', teacher:'teacher1'},
   {no:5, name:'신예아', group:'pink', teacher:'teacher1'},{no:6, name:'박시윤', group:'pink', teacher:'teacher1'},{no:7, name:'한지호', group:'pink', teacher:'teacher1'},{no:8, name:'제갈준', group:'pink', teacher:'teacher1'},
   {no:9, name:'안제나', group:'pink', teacher:'teacher1'},{no:10,name:'신서율', group:'pink', teacher:'teacher1'},{no:11,name:'김루하', group:'pink', teacher:'teacher1'},{no:12,name:'이로헌', group:'pink', teacher:'teacher1'},
@@ -882,10 +846,77 @@ const CHILDREN = [
   {no:24,name:'김주아', group:'blue', teacher:'teacher3'},{no:25,name:'신우아', group:'blue', teacher:'teacher3'},{no:26,name:'김승호', group:'blue', teacher:'teacher3'},{no:27,name:'강은솔', group:'blue', teacher:'teacher3'},{no:28,name:'권지율', group:'blue', teacher:'teacher3'}
 ];
 
+let CHILDREN = JSON.parse(JSON.stringify(DEFAULT_CHILDREN));
 const shimangData = {};
-CHILDREN.forEach(c => {
-  shimangData[c.no] = { type:'', date:'', content:'' };
-});
+CHILDREN.forEach(c => { shimangData[c.no] = { type:'', date:'', content:'' }; });
+
+// ══════════════════════════════
+//   Google Sheets API
+// ══════════════════════════════
+function gsRequest(params) {
+  const url = SCRIPT_URL + '?' + Object.entries(params)
+    .map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
+  return fetch(url).then(r => r.json());
+}
+
+async function loadFromSheets() {
+  showSyncStatus('🔄 데이터 불러오는 중...', 'loading');
+  try {
+    const res = await gsRequest({ action: 'load' });
+    if (res.ok && res.children && res.children.length > 0) {
+      CHILDREN.length = 0;
+      res.children.forEach(c => {
+        CHILDREN.push(c);
+        shimangData[c.no] = res.shimangData[c.no] || { type:'', date:'', content:'' };
+      });
+      showSyncStatus('✅ 불러오기 완료', 'ok');
+    } else {
+      showSyncStatus('⚠️ 데이터 없음 — 기본값 사용', 'warn');
+    }
+  } catch(e) {
+    showSyncStatus('❌ 연결 실패 — 오프라인 모드', 'error');
+  }
+  renderGrid();
+  updateSendStats();
+}
+
+async function saveToSheets(no) {
+  const sd = shimangData[no];
+  try {
+    await gsRequest({
+      action: 'save',
+      data: JSON.stringify({ no, type: sd.type, date: sd.date, content: sd.content })
+    });
+  } catch(e) { /* 오프라인 시 무시 */ }
+}
+
+async function addChildToSheets(child) {
+  try {
+    await gsRequest({ action: 'addChild', child: JSON.stringify(child) });
+  } catch(e) {}
+}
+
+async function deleteChildFromSheets(no) {
+  try {
+    await gsRequest({ action: 'deleteChild', no: String(no) });
+  } catch(e) {}
+}
+
+function showSyncStatus(msg, type) {
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = type === 'ok' ? '#2eae87' : type === 'error' ? '#e74c3c' : type === 'warn' ? '#f0a500' : '#3a86c8';
+  if (type === 'ok') setTimeout(() => { el.textContent = ''; }, 3000);
+}
+
+// localStorage도 병행 유지 (오프라인 백업)
+function saveLocalBackup() {
+  try {
+    localStorage.setItem('shimang_children', JSON.stringify(CHILDREN));
+    localStorage.setItem('shimang_data', JSON.stringify(shimangData));
+  } catch(e) {}
+}
 
 let selectedChildNo = null;
 let selectedType = '';
@@ -1033,8 +1064,11 @@ function confirmAddChild() {
   // 그룹에 맞는 teacher 자동 배정
   const groupTeacher = { pink: 'teacher1', green: 'teacher2', blue: 'teacher3' };
   const newNo = CHILDREN.length > 0 ? Math.max(...CHILDREN.map(c => c.no)) + 1 : 1;
-  CHILDREN.push({ no: newNo, name, group: selectedNewGroup, teacher: groupTeacher[selectedNewGroup] || 'teacher3' });
+  const newChild = { no: newNo, name, group: selectedNewGroup, teacher: groupTeacher[selectedNewGroup] || 'teacher3' };
+  CHILDREN.push(newChild);
   shimangData[newNo] = { type: '', date: '', content: '' };
+  addChildToSheets(newChild);
+  saveLocalBackup();
 
   closeAddModal();
   renderGrid();
@@ -1144,6 +1178,8 @@ function doDeleteChild() {
   CHILDREN.splice(idx, 1);
   delete shimangData[deleteTargetNo];
   deletePhotoData(deleteTargetNo);
+  deleteChildFromSheets(deleteTargetNo);
+  saveLocalBackup();
 
   // 편집 패널이 열려있던 아이면 닫기
   if (selectedChildNo === deleteTargetNo) {
@@ -1285,6 +1321,8 @@ function saveChild() {
   d.type = selectedType;
   d.date = document.getElementById('editDate').value;
   d.content = document.getElementById('editContent').value.trim();
+  saveToSheets(selectedChildNo);
+  saveLocalBackup();
   closePanel();
   showToast('✅ 저장되었습니다!', 'success');
 }
@@ -1345,35 +1383,99 @@ async function downloadExcel() {
 
   document.getElementById('loadingExcel').classList.add('show');
 
-  // 날짜 파싱 (시간대 버그 방지: YYYY-MM-DD를 직접 분리)
   const [yyyy, mm, dd] = dateVal.split('-').map(Number);
   const d = new Date(yyyy, mm - 1, dd);
   const sheetName = `${mm}_${dd}`;
   const tInfo = currentTeacher && currentTeacher !== 'all' ? TEACHER_INFO[currentTeacher] : { label: '전체' };
   const dateLabel = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}(${['일','월','화','수','목','금','토'][d.getDay()]})`;
-
-  // 현재 선생님 담당 아이만 필터
   const filtered = (!currentTeacher || currentTeacher === 'all')
     ? CHILDREN : CHILDREN.filter(c => c.teacher === currentTeacher);
 
-  const aoa = [
-    ['','','','','','','',''],
-    ['','유아부 심방 보고서','','', tInfo.label,'','', dateLabel],
-    ['','','','','','','',''],
-    ['','No.','이름','부모','사진','심방 종류','심방일자','내용'],
-  ];
-  filtered.forEach(c => {
-    const sd = shimangData[c.no];
-    aoa.push(['', c.no, c.name, '', '', sd.type||'', sd.date||'', sd.content||'']);
+  // ── 서식 정의 ──
+  const fontBase   = { name: '맑은 고딕', sz: 11 };
+  const fontTitle  = { name: '맑은 고딕', sz: 16, bold: true };
+  const fontHeader = { name: '맑은 고딕', sz: 11, bold: true };
+  const fontName   = { name: '맑은 고딕', sz: 11, bold: true };
+  const alignCC    = { horizontal: 'center', vertical: 'center', wrapText: false };
+  const alignCCW   = { horizontal: 'center', vertical: 'center', wrapText: true };
+  const alignVC    = { vertical: 'center', wrapText: true };
+  const alignRC    = { horizontal: 'right', vertical: 'top', wrapText: true };
+  const thinBorder = {
+    top:    { style: 'thin' }, bottom: { style: 'thin' },
+    left:   { style: 'thin' }, right:  { style: 'thin' }
+  };
+
+  function cell(v, font, alignment, border) {
+    const c = { v, t: typeof v === 'number' ? 'n' : 's' };
+    const s = {};
+    if (font)      s.font      = font;
+    if (alignment) s.alignment = alignment;
+    if (border)    s.border    = border;
+    if (Object.keys(s).length) c.s = s;
+    return c;
+  }
+
+  // ── 워크시트 데이터 구성 ──
+  const ws = {};
+
+  // 1행: 빈 행
+  // 2행: 제목 + 날짜
+  ws['B2'] = cell('유아부 심방 보고서', fontTitle, { vertical: 'center' });
+  ws['E2'] = cell(tInfo.label, fontBase, alignVC);
+  ws['H2'] = cell(dateLabel, fontBase, alignRC);
+
+  // 3행: 빈 행
+  // 4행: 헤더
+  const headers = ['No.','이름','부모','사진','심방 종류','심방일자','내용'];
+  ['B','C','D','E','F','G','H'].forEach((col, i) => {
+    ws[col + '4'] = cell(headers[i], fontHeader, alignCCW, thinBorder);
   });
 
+  // 5행~: 데이터
+  filtered.forEach((c, i) => {
+    const row = 5 + i;
+    const sd = shimangData[c.no];
+    ws['B' + row] = cell(i === 0 ? 1 : { f: `B${row-1}+1` }, fontBase, alignCC, thinBorder);
+    ws['C' + row] = cell(c.name, fontName, alignCC, thinBorder);
+    ws['D' + row] = cell('', fontBase, alignCC, thinBorder);
+    ws['E' + row] = cell('', fontBase, alignCC, thinBorder);
+    ws['F' + row] = cell(sd.type || '', fontBase, alignCC, thinBorder);
+    ws['G' + row] = cell(sd.date || '', fontBase, alignCC, thinBorder);
+    ws['H' + row] = cell(sd.content || '', fontBase, alignVC, thinBorder);
+  });
+
+  // 범위 설정
+  const lastRow = 4 + filtered.length;
+  ws['!ref'] = `A1:H${lastRow}`;
+
+  // 열 너비 (원본과 동일)
+  ws['!cols'] = [
+    { wch: 0.8 },   // A
+    { wch: 4.4 },   // B (No.)
+    { wch: 9.9 },   // C (이름)
+    { wch: 9.9 },   // D (부모)
+    { wch: 30.0 },  // E (사진)
+    { wch: 12.3 },  // F (심방종류)
+    { wch: 13.0 },  // G (심방일자)
+    { wch: 60.0 },  // H (내용)
+  ];
+
+  // 행 높이 (원본과 동일)
+  ws['!rows'] = [
+    { hpt: 21 },   // 1행
+    { hpt: 25.5 }, // 2행
+    { hpt: 15 },   // 3행
+    { hpt: 15 },   // 4행 헤더
+  ];
+  for (let i = 0; i < filtered.length; i++) {
+    ws['!rows'].push({ hpt: 84 }); // 데이터행 높이 (약 112px → pt 변환)
+  }
+
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{wch:2},{wch:5},{wch:10},{wch:10},{wch:8},{wch:10},{wch:14},{wch:60}];
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
 
   const dateForFile = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
-  XLSX.writeFile(wb, `${dateForFile}_영유아부_심방보고서.xlsx`);
+  XLSX.writeFile(wb, `${dateForFile}_영유아부_심방보고서.xlsx`, { bookType: 'xlsx', cellStyles: true });
 
   document.getElementById('loadingExcel').classList.remove('show');
   showToast('📥 파일 저장 완료! 카톡 단톡방에 공유해 주세요 😊', 'success');
@@ -1472,9 +1574,9 @@ function showToast(msg, type = 'info') {
 }
 
 // ══════════════════════════════
-//   초기화
+//   초기화 — Google Sheets에서 데이터 로드
 // ══════════════════════════════
-renderGrid();
+loadFromSheets();
 </script>
 </body>
 </html>
