@@ -799,25 +799,39 @@ let CHILDREN = [];
 const shimangData = {};
 
 // ══════════════════════════════
-//   Google Sheets 연동
+//   Google Sheets 연동 (견고한 버전)
 // ══════════════════════════════
-function gsRequest(params) {
+async function gsRequest(params, retries = 2) {
   const url = SCRIPT_URL + '?' + Object.entries(params)
     .map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
-  return fetch(url).then(r => r.json());
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const data = await response.json();
+      // Apps Script가 ok:false를 반환하면 에러로 간주
+      if (data.ok === false) throw new Error(data.error || 'Unknown server error');
+      return data;
+    } catch(e) {
+      if (attempt === retries) {
+        console.error('[gsRequest 실패]', params.action, e.message);
+        throw e;
+      }
+      // 재시도 전 짧은 대기
+      await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
 }
 
 // Google Sheets에서 온 날짜를 YYYY-MM-DD 형식으로 정규화
 function normalizeDate(val) {
   if (!val) return '';
-  // 이미 YYYY-MM-DD 형태면 그대로
   if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
-  // ISO 형식 (예: 2026-04-17T15:00:00.000Z) 처리
   if (typeof val === 'string' && val.includes('T')) {
     try {
       const d = new Date(val);
       if (!isNaN(d.getTime())) {
-        // 한국 시간대 기준으로 YYYY-MM-DD 추출
         const yyyy = d.getFullYear();
         const mm = String(d.getMonth() + 1).padStart(2, '0');
         const dd = String(d.getDate()).padStart(2, '0');
@@ -832,22 +846,24 @@ async function loadFromSheets() {
   showSyncStatus('🔄 불러오는 중...', 'loading');
   try {
     const res = await gsRequest({ action: 'load' });
-    if (res.ok && res.children && res.children.length > 0) {
+    if (res.children && res.children.length > 0) {
       CHILDREN.length = 0;
       res.children.forEach(c => {
         c.no = Number(c.no);
         CHILDREN.push(c);
         const sd = res.shimangData[c.no] || res.shimangData[String(c.no)] || { type:'', date:'', content:'' };
-        sd.date = normalizeDate(sd.date); // 날짜 정규화
+        sd.date = normalizeDate(sd.date);
         shimangData[c.no] = sd;
       });
       showSyncStatus('✅ 불러오기 완료', 'ok');
+      saveLocalBackup(); // 로드 후 백업도 갱신
     } else {
       CHILDREN.push(...JSON.parse(JSON.stringify(DEFAULT_CHILDREN)));
       CHILDREN.forEach(c => { shimangData[c.no] = { type:'', date:'', content:'' }; });
       showSyncStatus('✅ 기본 데이터 로드', 'ok');
     }
   } catch(e) {
+    console.error('[loadFromSheets 실패]', e.message);
     const saved = localStorage.getItem('shimang_children');
     if (saved) {
       const parsed = JSON.parse(saved);
@@ -859,18 +875,71 @@ async function loadFromSheets() {
         Object.keys(parsedData).forEach(k => { shimangData[Number(k)] = parsedData[k]; });
       }
       CHILDREN.forEach(c => { if (!shimangData[c.no]) shimangData[c.no] = { type:'', date:'', content:'' }; });
+      showSyncStatus('⚠️ 오프라인 모드 - 로컬 데이터 사용', 'warn');
     } else {
       CHILDREN.push(...JSON.parse(JSON.stringify(DEFAULT_CHILDREN)));
       CHILDREN.forEach(c => { shimangData[c.no] = { type:'', date:'', content:'' }; });
+      showSyncStatus('❌ 연결 실패 - 기본값 사용', 'error');
     }
-    showSyncStatus('⚠️ 오프라인 모드', 'warn');
   }
 
-  // 그룹별 정렬 (pink → green → blue, 그룹 내에선 원래 순서 유지)
   sortChildrenByGroup();
-
   renderGrid();
   updateSendStats();
+}
+
+async function saveToSheets(no) {
+  const sd = shimangData[no];
+  saveLocalBackup(); // 먼저 로컬에 백업
+  try {
+    await gsRequest({ action: 'save', data: JSON.stringify({ no, type: sd.type, date: sd.date, content: sd.content }) });
+    showSyncStatus('✅ 저장 완료', 'ok');
+    return true;
+  } catch(e) {
+    showSyncStatus('⚠️ 저장 실패 - 로컬에만 저장됨', 'error');
+    return false;
+  }
+}
+
+async function addChildToSheets(child) {
+  saveLocalBackup();
+  try {
+    await gsRequest({ action: 'addChild', child: JSON.stringify(child) });
+    showSyncStatus('✅ 추가 완료', 'ok');
+    return true;
+  } catch(e) {
+    showSyncStatus('⚠️ 시트 동기화 실패 - 로컬에만 추가됨', 'error');
+    return false;
+  }
+}
+
+async function deleteChildFromSheets(no) {
+  saveLocalBackup();
+  try {
+    await gsRequest({ action: 'deleteChild', no: String(no) });
+    showSyncStatus('✅ 삭제 완료', 'ok');
+    return true;
+  } catch(e) {
+    showSyncStatus('⚠️ 시트 동기화 실패 - 로컬에만 삭제됨', 'error');
+    return false;
+  }
+}
+
+function saveLocalBackup() {
+  try {
+    localStorage.setItem('shimang_children', JSON.stringify(CHILDREN));
+    localStorage.setItem('shimang_data', JSON.stringify(shimangData));
+  } catch(e) {
+    console.error('[localStorage 저장 실패]', e.message);
+  }
+}
+
+function showSyncStatus(msg, type) {
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = type === 'ok' ? '#2eae87' : type === 'error' ? '#e74c3c' : type === 'warn' ? '#f0a500' : '#3a86c8';
+  if (type === 'ok') setTimeout(() => { el.textContent = ''; }, 3000);
 }
 
 function sortChildrenByGroup() {
@@ -898,39 +967,6 @@ function sortChildrenByGroup() {
     // 둘 다 새 아이면 no 순서
     return a.no - b.no;
   });
-}
-
-async function saveToSheets(no) {
-  const sd = shimangData[no];
-  try {
-    await gsRequest({ action: 'save', data: JSON.stringify({ no, type: sd.type, date: sd.date, content: sd.content }) });
-  } catch(e) {}
-  saveLocalBackup();
-}
-
-async function addChildToSheets(child) {
-  try { await gsRequest({ action: 'addChild', child: JSON.stringify(child) }); } catch(e) {}
-  saveLocalBackup();
-}
-
-async function deleteChildFromSheets(no) {
-  try { await gsRequest({ action: 'deleteChild', no: String(no) }); } catch(e) {}
-  saveLocalBackup();
-}
-
-function saveLocalBackup() {
-  try {
-    localStorage.setItem('shimang_children', JSON.stringify(CHILDREN));
-    localStorage.setItem('shimang_data', JSON.stringify(shimangData));
-  } catch(e) {}
-}
-
-function showSyncStatus(msg, type) {
-  const el = document.getElementById('syncStatus');
-  if (!el) return;
-  el.textContent = msg;
-  el.style.color = type === 'ok' ? '#2eae87' : type === 'error' ? '#e74c3c' : type === 'warn' ? '#f0a500' : '#3a86c8';
-  if (type === 'ok') setTimeout(() => { el.textContent = ''; }, 3000);
 }
 
 let selectedChildNo = null;
@@ -1360,15 +1396,24 @@ function closePanel() {
   renderGrid();
 }
 
-function saveChild() {
+async function saveChild() {
   if (!selectedChildNo) return;
   const d = shimangData[selectedChildNo];
   d.type = selectedType;
   d.date = document.getElementById('editDate').value;
   d.content = document.getElementById('editContent').value.trim();
-  saveToSheets(selectedChildNo);
+
+  // 먼저 UI 닫고 사용자에게 즉시 피드백
   closePanel();
-  showToast('✅ 저장되었습니다!', 'success');
+  showToast('💾 저장 중...', 'info');
+
+  // 백그라운드로 시트 저장
+  const ok = await saveToSheets(selectedChildNo);
+  if (ok) {
+    showToast('✅ 저장되었습니다!', 'success');
+  } else {
+    showToast('⚠️ 시트 저장 실패 - 로컬에만 저장됨', 'error');
+  }
 }
 
 // ══════════════════════════════
